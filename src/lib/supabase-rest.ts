@@ -29,6 +29,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 export const db = {
   select: <T>(table: string, query = "select=*") => request<T[]>(`${table}?${query}`),
   insert: <T>(table: string, rows: unknown[]) => request<T[]>(table, { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(rows) }),
+  upsert: <T>(table: string, rows: unknown[]) => request<T[]>(table, { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(rows) }),
   update: <T>(table: string, query: string, patch: unknown) => request<T[]>(`${table}?${query}`, { method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify(patch) }),
   remove: (table: string, query: string) => request<void>(`${table}?${query}`, { method: "DELETE", headers: { Prefer: "return=minimal" } }),
 };
