@@ -1,286 +1,51 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import {
-  agents as seedAgents,
-  articles as seedArticles,
-  customers as seedCustomers,
-  tickets as seedTickets,
-  type Agent,
-  type Article,
-  type Customer,
-  type Message,
-  type Ticket,
-  type TicketPriority,
-  type TicketStatus,
-} from "./demo-data";
+import { agents as seedAgents, articles as seedArticles, customers as seedCustomers, tickets as seedTickets, type Agent, type Article, type Customer, type Message, type Ticket, type TicketPriority, type TicketStatus } from "./demo-data";
 import { db, isSupabaseConfigured } from "./supabase-rest";
 
-export type Settings = {
-  autoDraft: boolean;
-  autoClassify: boolean;
-  autoResolveSimple: boolean;
-  tone: string;
-  confidenceThreshold: number;
-  notifyEscalations: boolean;
-  notifyDigest: boolean;
-  notifyCsat: boolean;
-};
+export type Settings = { autoDraft: boolean; autoClassify: boolean; autoResolveSimple: boolean; tone: string; confidenceThreshold: number; notifyEscalations: boolean; notifyDigest: boolean; notifyCsat: boolean };
 
-type SupportContextValue = {
-  tickets: Ticket[];
-  customers: Customer[];
-  agents: Agent[];
-  articles: Article[];
-  settings: Settings;
-  user: { name: string; email: string; initials: string } | null;
-  loading: boolean;
-  error: string | null;
-  signIn: (email: string, name?: string) => void;
-  signOut: () => void;
-  refresh: () => Promise<void>;
-  updateTicket: (id: string, patch: Partial<Ticket>) => Promise<void>;
-  addMessage: (id: string, message: Omit<Message, "id" | "at">) => Promise<void>;
-  saveArticle: (article: Article) => Promise<void>;
-  deleteArticle: (id: string) => Promise<void>;
-  updateSettings: (patch: Partial<Settings>) => Promise<void>;
-  getCustomer: (id: string) => Customer | undefined;
-  ticketsForCustomer: (id: string) => Ticket[];
-};
-
+type SupportContextValue = { tickets: Ticket[]; customers: Customer[]; agents: Agent[]; articles: Article[]; settings: Settings; user: { name: string; email: string; initials: string } | null; loading: boolean; error: string | null; signIn: (email: string, name?: string) => void; signOut: () => void; refresh: () => Promise<void>; updateTicket: (id: string, patch: Partial<Ticket>) => Promise<void>; addMessage: (id: string, message: Omit<Message, "id" | "at">) => Promise<void>; saveArticle: (article: Article) => Promise<void>; deleteArticle: (id: string) => Promise<void>; updateSettings: (patch: Partial<Settings>) => Promise<void>; getCustomer: (id: string) => Customer | undefined; ticketsForCustomer: (id: string) => Ticket[] };
 const SupportContext = createContext<SupportContextValue | null>(null);
+const defaultSettings: Settings = { autoDraft: true, autoClassify: true, autoResolveSimple: false, tone: "professional", confidenceThreshold: 80, notifyEscalations: true, notifyDigest: true, notifyCsat: false };
 
-const defaultSettings: Settings = {
-  autoDraft: true,
-  autoClassify: true,
-  autoResolveSimple: false,
-  tone: "professional",
-  confidenceThreshold: 80,
-  notifyEscalations: true,
-  notifyDigest: true,
-  notifyCsat: false,
-};
+type TicketRow = { id: string; subject: string; customer_id: string; assignee_id: string | null; status: Ticket["status"]; priority: Ticket["priority"]; channel: Ticket["channel"]; tags: string[]; created_at: string; updated_at: string; sentiment: Ticket["sentiment"]; ai_handled: boolean; first_response_mins: number | null; messages: Message[] };
+type SettingsRow = { id: string; auto_draft: boolean; auto_classify: boolean; auto_resolve_simple: boolean; tone: string; confidence_threshold: number; notify_escalations: boolean; notify_digest: boolean; notify_csat: boolean };
 
-type TicketRow = Omit<Ticket, "customerId" | "assigneeId" | "createdAt" | "updatedAt" | "firstResponseMins" | "aiHandled"> & {
-  customer_id: string;
-  assignee_id: string | null;
-  created_at: string;
-  updated_at: string;
-  first_response_mins: number | null;
-  ai_handled: boolean;
-};
-
-type SettingsRow = {
-  id: string;
-  auto_draft: boolean;
-  auto_classify: boolean;
-  auto_resolve_simple: boolean;
-  tone: string;
-  confidence_threshold: number;
-  notify_escalations: boolean;
-  notify_digest: boolean;
-  notify_csat: boolean;
-};
-
-function fromTicketRow(row: TicketRow): Ticket {
-  return {
-    id: row.id,
-    subject: row.subject,
-    customerId: row.customer_id,
-    assigneeId: row.assignee_id,
-    status: row.status,
-    priority: row.priority,
-    channel: row.channel,
-    tags: row.tags,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    sentiment: row.sentiment,
-    aiHandled: row.ai_handled,
-    firstResponseMins: row.first_response_mins,
-    messages: row.messages ?? [],
-  };
-}
-
-function toTicketRow(ticket: Ticket): TicketRow {
-  return {
-    id: ticket.id,
-    subject: ticket.subject,
-    customer_id: ticket.customerId,
-    assignee_id: ticket.assigneeId,
-    status: ticket.status,
-    priority: ticket.priority,
-    channel: ticket.channel,
-    tags: ticket.tags,
-    created_at: ticket.createdAt,
-    updated_at: ticket.updatedAt,
-    sentiment: ticket.sentiment,
-    ai_handled: ticket.aiHandled,
-    first_response_mins: ticket.firstResponseMins,
-    messages: ticket.messages,
-  };
-}
-
-function fromSettings(row: SettingsRow): Settings {
-  return {
-    autoDraft: row.auto_draft,
-    autoClassify: row.auto_classify,
-    autoResolveSimple: row.auto_resolve_simple,
-    tone: row.tone,
-    confidenceThreshold: row.confidence_threshold,
-    notifyEscalations: row.notify_escalations,
-    notifyDigest: row.notify_digest,
-    notifyCsat: row.notify_csat,
-  };
-}
-
-function toSettings(patch: Partial<Settings>) {
-  return {
-    ...(patch.autoDraft === undefined ? {} : { auto_draft: patch.autoDraft }),
-    ...(patch.autoClassify === undefined ? {} : { auto_classify: patch.autoClassify }),
-    ...(patch.autoResolveSimple === undefined ? {} : { auto_resolve_simple: patch.autoResolveSimple }),
-    ...(patch.tone === undefined ? {} : { tone: patch.tone }),
-    ...(patch.confidenceThreshold === undefined ? {} : { confidence_threshold: patch.confidenceThreshold }),
-    ...(patch.notifyEscalations === undefined ? {} : { notify_escalations: patch.notifyEscalations }),
-    ...(patch.notifyDigest === undefined ? {} : { notify_digest: patch.notifyDigest }),
-    ...(patch.notifyCsat === undefined ? {} : { notify_csat: patch.notifyCsat }),
-    updated_at: new Date().toISOString(),
-  };
-}
+function fromTicketRow(r: TicketRow): Ticket { return { id: r.id, subject: r.subject, customerId: r.customer_id, assigneeId: r.assignee_id, status: r.status, priority: r.priority, channel: r.channel, tags: r.tags ?? [], createdAt: r.created_at, updatedAt: r.updated_at, sentiment: r.sentiment, aiHandled: r.ai_handled, firstResponseMins: r.first_response_mins, messages: r.messages ?? [] }; }
+function toTicketRow(t: Ticket): TicketRow { return { id: t.id, subject: t.subject, customer_id: t.customerId, assignee_id: t.assigneeId, status: t.status, priority: t.priority, channel: t.channel, tags: t.tags, created_at: t.createdAt, updated_at: t.updatedAt, sentiment: t.sentiment, ai_handled: t.aiHandled, first_response_mins: t.firstResponseMins, messages: t.messages }; }
+function fromSettings(r: SettingsRow): Settings { return { autoDraft: r.auto_draft, autoClassify: r.auto_classify, autoResolveSimple: r.auto_resolve_simple, tone: r.tone, confidenceThreshold: r.confidence_threshold, notifyEscalations: r.notify_escalations, notifyDigest: r.notify_digest, notifyCsat: r.notify_csat }; }
+function settingsRow(s: Settings) { return { id: "default", auto_draft: s.autoDraft, auto_classify: s.autoClassify, auto_resolve_simple: s.autoResolveSimple, tone: s.tone, confidence_threshold: s.confidenceThreshold, notify_escalations: s.notifyEscalations, notify_digest: s.notifyDigest, notify_csat: s.notifyCsat, updated_at: new Date().toISOString() }; }
 
 export function SupportProvider({ children }: { children: ReactNode }) {
-  const [tickets, setTickets] = useState<Ticket[]>(seedTickets);
-  const [customers, setCustomers] = useState<Customer[]>(seedCustomers);
-  const [agents, setAgents] = useState<Agent[]>(seedAgents);
-  const [articles, setArticles] = useState<Article[]>(seedArticles);
-  const [settings, setSettings] = useState<Settings>(defaultSettings);
-  const [loading, setLoading] = useState(isSupabaseConfigured());
-  const [error, setError] = useState<string | null>(null);
-  const [user, setUser] = useState<SupportContextValue["user"]>(() => {
-    try {
-      const saved = localStorage.getItem("support-hub-user");
-      return saved ? JSON.parse(saved) : { name: "Maya Okonkwo", email: "maya@helm.support", initials: "MO" };
-    } catch {
-      return { name: "Maya Okonkwo", email: "maya@helm.support", initials: "MO" };
-    }
-  });
+  const [tickets, setTickets] = useState<Ticket[]>(seedTickets); const [customers, setCustomers] = useState<Customer[]>(seedCustomers); const [agents, setAgents] = useState<Agent[]>(seedAgents); const [articles, setArticles] = useState<Article[]>(seedArticles); const [settings, setSettings] = useState<Settings>(defaultSettings); const [loading, setLoading] = useState(isSupabaseConfigured()); const [error, setError] = useState<string | null>(null);
+  const [user, setUser] = useState<SupportContextValue["user"]>(() => { try { const s = localStorage.getItem("support-hub-user"); return s ? JSON.parse(s) : { name: "Maya Okonkwo", email: "maya@helm.support", initials: "MO" }; } catch { return { name: "Maya Okonkwo", email: "maya@helm.support", initials: "MO" }; } });
 
   const refresh = useCallback(async () => {
-    if (!isSupabaseConfigured()) return;
-    setLoading(true);
-    setError(null);
+    if (!isSupabaseConfigured()) return; setLoading(true); setError(null);
     try {
-      const [agentRows, customerRows, ticketRows, articleRows, settingRows] = await Promise.all([
-        db.select<Agent>("agents"),
-        db.select<Customer>("customers"),
-        db.select<TicketRow>("tickets", "select=*&order=updated_at.desc"),
-        db.select<Article>("articles", "select=*&order=updated_at.desc"),
-        db.select<SettingsRow>("support_settings", "select=*&id=eq.default"),
-      ]);
-
-      if (!agentRows.length) await db.upsert("agents", seedAgents);
-      if (!customerRows.length) await db.upsert("customers", seedCustomers.map((c) => ({ ...c, lifetime_value: c.lifetimeValue })));
-      if (!ticketRows.length) await db.upsert("tickets", seedTickets.map(toTicketRow));
-      if (!articleRows.length) await db.upsert("articles", seedArticles.map((a) => ({ ...a, updated_at: a.updatedAt, ai_uses: a.aiUses })));
-      if (!settingRows.length) await db.upsert("support_settings", [{ id: "default", ...toSettings(defaultSettings) }]);
-
-      const [freshAgents, freshCustomers, freshTickets, freshArticles, freshSettings] = await Promise.all([
-        db.select<Agent>("agents"),
-        db.select<ArrayElement<typeof seedCustomers>>("customers"),
-        db.select<TicketRow>("tickets", "select=*&order=updated_at.desc"),
-        db.select<Article>("articles", "select=*&order=updated_at.desc"),
-        db.select<SettingsRow>("support_settings", "select=*&id=eq.default"),
-      ]);
-
-      setAgents(freshAgents.map((a) => ({ ...a })));
-      setCustomers(freshCustomers.map((c: any) => ({ ...c, lifetimeValue: Number(c.lifetime_value ?? c.lifetimeValue ?? 0) })));
-      setTickets(freshTickets.map(fromTicketRow));
-      setArticles(freshArticles.map((a: any) => ({ ...a, updatedAt: a.updated_at ?? a.updatedAt, aiUses: Number(a.ai_uses ?? a.aiUses ?? 0) })));
-      if (freshSettings[0]) setSettings(fromSettings(freshSettings[0]));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load support data.");
-    } finally {
-      setLoading(false);
-    }
+      const [ar, cr, tr, kb, sr] = await Promise.all([db.select<Agent>("agents"), db.select<any>("customers"), db.select<TicketRow>("tickets", "select=*&order=updated_at.desc"), db.select<any>("articles", "select=*&order=updated_at.desc"), db.select<SettingsRow>("support_settings", "select=*&id=eq.default")]);
+      if (!ar.length) await db.upsert("agents", seedAgents);
+      if (!cr.length) await db.upsert("customers", seedCustomers.map(c => ({ id: c.id, name: c.name, email: c.email, company: c.company, plan: c.plan, location: c.location, since: c.since, lifetime_value: c.lifetimeValue, initials: c.initials, csat: c.csat })));
+      if (!tr.length) await db.upsert("tickets", seedTickets.map(toTicketRow));
+      if (!kb.length) await db.upsert("articles", seedArticles.map(a => ({ id: a.id, title: a.title, category: a.category, body: a.body, status: a.status, updated_at: a.updatedAt, views: a.views, ai_uses: a.aiUses })));
+      if (!sr.length) await db.upsert("support_settings", [settingsRow(defaultSettings)]);
+      const [agentsNow, customersNow, ticketsNow, articlesNow, settingsNow] = await Promise.all([db.select<Agent>("agents"), db.select<any>("customers"), db.select<TicketRow>("tickets", "select=*&order=updated_at.desc"), db.select<any>("articles", "select=*&order=updated_at.desc"), db.select<SettingsRow>("support_settings", "select=*&id=eq.default")]);
+      setAgents(agentsNow); setCustomers(customersNow.map(c => ({ id: c.id, name: c.name, email: c.email, company: c.company, plan: c.plan, location: c.location, since: c.since, lifetimeValue: Number(c.lifetime_value ?? 0), initials: c.initials, csat: Number(c.csat ?? 0) }))); setTickets(ticketsNow.map(fromTicketRow)); setArticles(articlesNow.map(a => ({ id: a.id, title: a.title, category: a.category, body: a.body, status: a.status, updatedAt: a.updated_at, views: Number(a.views ?? 0), aiUses: Number(a.ai_uses ?? 0) }))); if (settingsNow[0]) setSettings(fromSettings(settingsNow[0]));
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load support data."); } finally { setLoading(false); }
   }, []);
-
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const updateTicket = useCallback(async (id: string, patch: Partial<Ticket>) => {
-    const updatedAt = new Date().toISOString();
-    setTickets((prev) => prev.map((t) => t.id === id ? { ...t, ...patch, updatedAt } : t));
-    if (isSupabaseConfigured()) {
-      const dbPatch: Record<string, unknown> = { updated_at: updatedAt };
-      if (patch.subject !== undefined) dbPatch.subject = patch.subject;
-      if (patch.assigneeId !== undefined) dbPatch.assignee_id = patch.assigneeId;
-      if (patch.status !== undefined) dbPatch.status = patch.status;
-      if (patch.priority !== undefined) dbPatch.priority = patch.priority;
-      if (patch.tags !== undefined) dbPatch.tags = patch.tags;
-      if (patch.sentiment !== undefined) dbPatch.sentiment = patch.sentiment;
-      if (patch.aiHandled !== undefined) dbPatch.ai_handled = patch.aiHandled;
-      if (patch.firstResponseMins !== undefined) dbPatch.first_response_mins = patch.firstResponseMins;
-      if (patch.messages !== undefined) dbPatch.messages = patch.messages;
-      await db.update("tickets", `id=eq.${encodeURIComponent(id)}`, dbPatch);
-    }
-  }, []);
-
-  const addMessage = useCallback(async (id: string, message: Omit<Message, "id" | "at">) => {
-    const now = new Date().toISOString();
-    const ticket = tickets.find((t) => t.id === id);
-    if (!ticket) return;
-    const nextMessages = [...ticket.messages, { ...message, id: `m-${crypto.randomUUID()}`, at: now }];
-    await updateTicket(id, { messages: nextMessages });
-  }, [tickets, updateTicket]);
-
-  const saveArticle = useCallback(async (article: Article) => {
-    const next = { ...article, updatedAt: new Date().toISOString() };
-    setArticles((prev) => prev.some((a) => a.id === next.id) ? prev.map((a) => a.id === next.id ? next : a) : [next, ...prev]);
-    if (isSupabaseConfigured()) {
-      await db.upsert("articles", [{ id: next.id, title: next.title, category: next.category, body: next.body, status: next.status, updated_at: next.updatedAt, views: next.views, ai_uses: next.aiUses }]);
-    }
-  }, []);
-
-  const deleteArticle = useCallback(async (id: string) => {
-    setArticles((prev) => prev.filter((a) => a.id !== id));
-    if (isSupabaseConfigured()) await db.remove("articles", `id=eq.${encodeURIComponent(id)}`);
-  }, []);
-
-  const updateSettings = useCallback(async (patch: Partial<Settings>) => {
-    setSettings((s) => ({ ...s, ...patch }));
-    if (isSupabaseConfigured()) await db.update("support_settings", "id=eq.default", toSettings(patch));
-  }, []);
-
-  const signIn = useCallback((email: string, name?: string) => {
-    const resolvedName = name?.trim() || "Maya Okonkwo";
-    const next = { email, name: resolvedName, initials: (name?.trim() || email).split(/[\s.@]/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join("") };
-    setUser(next);
-    localStorage.setItem("support-hub-user", JSON.stringify(next));
-  }, []);
-
+  const updateTicket = useCallback(async (id: string, patch: Partial<Ticket>) => { const updatedAt = new Date().toISOString(); setTickets(p => p.map(t => t.id === id ? { ...t, ...patch, updatedAt } : t)); if (isSupabaseConfigured()) { const d: Record<string, unknown> = { updated_at: updatedAt }; if (patch.subject !== undefined) d.subject = patch.subject; if (patch.assigneeId !== undefined) d.assignee_id = patch.assigneeId; if (patch.status !== undefined) d.status = patch.status; if (patch.priority !== undefined) d.priority = patch.priority; if (patch.tags !== undefined) d.tags = patch.tags; if (patch.sentiment !== undefined) d.sentiment = patch.sentiment; if (patch.aiHandled !== undefined) d.ai_handled = patch.aiHandled; if (patch.firstResponseMins !== undefined) d.first_response_mins = patch.firstResponseMins; if (patch.messages !== undefined) d.messages = patch.messages; await db.update("tickets", `id=eq.${encodeURIComponent(id)}`, d); } }, []);
+  const addMessage = useCallback(async (id: string, message: Omit<Message, "id" | "at">) => { const t = tickets.find(x => x.id === id); if (!t) return; await updateTicket(id, { messages: [...t.messages, { ...message, id: `m-${crypto.randomUUID()}`, at: new Date().toISOString() }] }); }, [tickets, updateTicket]);
+  const saveArticle = useCallback(async (a: Article) => { const next = { ...a, updatedAt: new Date().toISOString() }; setArticles(p => p.some(x => x.id === next.id) ? p.map(x => x.id === next.id ? next : x) : [next, ...p]); if (isSupabaseConfigured()) await db.upsert("articles", [{ id: next.id, title: next.title, category: next.category, body: next.body, status: next.status, updated_at: next.updatedAt, views: next.views, ai_uses: next.aiUses }]); }, []);
+  const deleteArticle = useCallback(async (id: string) => { setArticles(p => p.filter(a => a.id !== id)); if (isSupabaseConfigured()) await db.remove("articles", `id=eq.${encodeURIComponent(id)}`); }, []);
+  const updateSettings = useCallback(async (patch: Partial<Settings>) => { const next = { ...settings, ...patch }; setSettings(next); if (isSupabaseConfigured()) await db.upsert("support_settings", [settingsRow(next)]); }, [settings]);
+  const signIn = useCallback((email: string, name?: string) => { const n = name?.trim() || "Maya Okonkwo"; const u = { email, name: n, initials: (name?.trim() || email).split(/[\s.@]/).filter(Boolean).slice(0, 2).map(p => p[0]!.toUpperCase()).join("") }; setUser(u); localStorage.setItem("support-hub-user", JSON.stringify(u)); }, []);
   const signOut = useCallback(() => { setUser(null); localStorage.removeItem("support-hub-user"); }, []);
-
-  const value = useMemo<SupportContextValue>(() => ({
-    tickets, customers, agents, articles, settings, user, loading, error,
-    signIn, signOut, refresh, updateTicket, addMessage, saveArticle, deleteArticle, updateSettings,
-    getCustomer: (id) => customers.find((c) => c.id === id),
-    ticketsForCustomer: (id) => tickets.filter((t) => t.customerId === id),
-  }), [tickets, customers, agents, articles, settings, user, loading, error, signIn, signOut, refresh, updateTicket, addMessage, saveArticle, deleteArticle, updateSettings]);
-
+  const value = useMemo<SupportContextValue>(() => ({ tickets, customers, agents, articles, settings, user, loading, error, signIn, signOut, refresh, updateTicket, addMessage, saveArticle, deleteArticle, updateSettings, getCustomer: id => customers.find(c => c.id === id), ticketsForCustomer: id => tickets.filter(t => t.customerId === id) }), [tickets, customers, agents, articles, settings, user, loading, error, signIn, signOut, refresh, updateTicket, addMessage, saveArticle, deleteArticle, updateSettings]);
   return <SupportContext.Provider value={value}>{children}</SupportContext.Provider>;
 }
-
-export function useSupport() {
-  const ctx = useContext(SupportContext);
-  if (!ctx) throw new Error("useSupport must be used inside SupportProvider");
-  return ctx;
-}
-
+export function useSupport() { const ctx = useContext(SupportContext); if (!ctx) throw new Error("useSupport must be used inside SupportProvider"); return ctx; }
 export const statusLabels: Record<TicketStatus, string> = { open: "Open", pending: "Pending", resolved: "Resolved", closed: "Closed" };
 export const priorityLabels: Record<TicketPriority, string> = { urgent: "Urgent", high: "High", normal: "Normal", low: "Low" };
-
-export function timeAgo(iso: string) {
-  const mins = Math.max(1, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
-
-type ArrayElement<T> = T extends readonly (infer U)[] ? U : never;
+export function timeAgo(iso: string) { const mins = Math.max(1, Math.round((Date.now() - new Date(iso).getTime()) / 60000)); if (mins < 60) return `${mins}m ago`; const hours = Math.round(mins / 60); if (hours < 24) return `${hours}h ago`; return `${Math.round(hours / 24)}d ago`; }
